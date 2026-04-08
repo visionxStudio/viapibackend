@@ -387,3 +387,120 @@ curl -X POST "$BASE_URL/api/auth/login/" \
 - `400 Bad Request`: Body format mismatch; ensure JSON keys match docs exactly.
 - OTP not received: confirm server is running and check terminal logs for OTP output.
 - `Invalid or expired OTP`: OTP is wrong, already used, or older than 10 minutes; request a new OTP.
+
+## Production Deployment (VPS + Nginx on custom port)
+
+This app can run with Gunicorn on localhost and be exposed by Nginx on a port other than `80`, for example `8081`.
+
+### 1) Server setup
+
+```bash
+sudo apt update
+sudo apt install -y python3-venv python3-pip nginx
+```
+
+### 2) App setup
+
+```bash
+cd /opt
+sudo mkdir -p backupapi
+sudo chown -R $USER:$USER backupapi
+cd backupapi
+# copy project files here
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env
+```
+
+Set `.env` values for production:
+- `DJANGO_SECRET_KEY` = strong random secret
+- `DJANGO_DEBUG=false`
+- `DJANGO_ALLOWED_HOSTS=103.250.133.68`
+- SMTP values
+
+Then run:
+
+```bash
+.venv/bin/python manage.py migrate
+.venv/bin/python manage.py collectstatic --noinput
+```
+
+### 3) Gunicorn systemd service (internal app port `9000`)
+
+Create `/etc/systemd/system/backupapi.service`:
+
+```ini
+[Unit]
+Description=Gunicorn for backupapi Django app
+After=network.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/backupapi
+EnvironmentFile=/opt/backupapi/.env
+ExecStart=/opt/backupapi/.venv/bin/gunicorn backupapi.wsgi:application --bind 127.0.0.1:9000 --workers 3 --timeout 120
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+
+```bash
+sudo chown -R www-data:www-data /opt/backupapi
+sudo systemctl daemon-reload
+sudo systemctl enable backupapi
+sudo systemctl start backupapi
+sudo systemctl status backupapi
+```
+
+### 4) Nginx site on custom public port (`8081`)
+
+Create `/etc/nginx/sites-available/backupapi`:
+
+```nginx
+server {
+    listen 8081;
+    server_name 103.250.133.68;
+
+    client_max_body_size 25M;
+
+    location /static/ {
+        alias /opt/backupapi/staticfiles/;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:9000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Enable site and reload:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/backupapi /etc/nginx/sites-enabled/backupapi
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+### 5) Open firewall
+
+Allow your custom port:
+
+```bash
+sudo ufw allow 8081/tcp
+```
+
+### 6) Access URL
+
+Use:
+
+`http://103.250.133.68:8081`
+
+Your existing project on `103.250.133.68:80` will remain untouched.
